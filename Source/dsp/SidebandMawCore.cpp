@@ -62,18 +62,6 @@ void SidebandMawCore::AtomicMawSnapshot::copyTo(MawSnapshot& destination) const 
     destination.warning = warning.load(std::memory_order_relaxed);
 }
 
-float SidebandMawCore::Allpass1::process(float input) noexcept
-{
-    const auto output = -a * input + z;
-    z = input + a * output;
-    return output;
-}
-
-void SidebandMawCore::Allpass1::reset() noexcept
-{
-    z = 0.0f;
-}
-
 float SidebandMawCore::DcBlocker::process(float input) noexcept
 {
     input = finiteOrZero(input);
@@ -99,21 +87,24 @@ void SidebandMawCore::prepare(double newSampleRate, int channelIndex)
 
 void SidebandMawCore::setHilbertCoefficients() noexcept
 {
-    const std::array<float, 4> iCoefficients { 0.0417f, 0.3297f, 0.7067f, 0.9239f };
-    const std::array<float, 4> qCoefficients { 0.1380f, 0.5120f, 0.8320f, 0.9820f };
-    for (std::size_t i = 0; i < iPath.size(); ++i)
+    constexpr auto center = latencySamples;
+    for (int tap = 0; tap < hilbertTaps; ++tap)
     {
-        iPath[i].a = iCoefficients[i];
-        qPath[i].a = qCoefficients[i];
+        const auto n = tap - center;
+        auto coefficient = 0.0f;
+        if (n != 0 && (std::abs(n) % 2) == 1)
+            coefficient = 2.0f / (pi * static_cast<float>(n));
+
+        const auto window = 0.54f - 0.46f * std::cos(twoPi * static_cast<float>(tap)
+                                                     / static_cast<float>(hilbertTaps - 1));
+        hilbertCoefficients[static_cast<std::size_t>(tap)] = coefficient * window;
     }
 }
 
 void SidebandMawCore::reset() noexcept
 {
-    for (auto& allpass : iPath)
-        allpass.reset();
-    for (auto& allpass : qPath)
-        allpass.reset();
+    hilbertRing.fill(0.0f);
+    hilbertWrite = 0;
     inputDc.reset();
     outputDc.reset();
     feedbackDc.reset();
@@ -135,15 +126,29 @@ void SidebandMawCore::reset() noexcept
     meterWrite = 0;
 }
 
-float SidebandMawCore::analyticImag(float input) noexcept
+float SidebandMawCore::analyticImag(float input, float& delayedReal) noexcept
 {
-    auto i = input;
-    auto q = input;
-    for (auto& allpass : iPath)
-        i = allpass.process(i);
-    for (auto& allpass : qPath)
-        q = allpass.process(q);
-    return q - 0.12f * i;
+    hilbertRing[static_cast<std::size_t>(hilbertWrite)] = input;
+
+    float imag = 0.0f;
+    for (int tap = 0; tap < hilbertTaps; ++tap)
+    {
+        auto index = hilbertWrite - tap;
+        if (index < 0)
+            index += hilbertTaps;
+        imag += hilbertCoefficients[static_cast<std::size_t>(tap)]
+              * hilbertRing[static_cast<std::size_t>(index)];
+    }
+
+    auto realIndex = hilbertWrite - latencySamples;
+    if (realIndex < 0)
+        realIndex += hilbertTaps;
+    delayedReal = hilbertRing[static_cast<std::size_t>(realIndex)];
+
+    if (++hilbertWrite >= hilbertTaps)
+        hilbertWrite = 0;
+
+    return finiteOrZero(imag);
 }
 
 float SidebandMawCore::fold(float input, float drive) noexcept
@@ -192,8 +197,9 @@ float SidebandMawCore::processSample(float input, const SidebandMawParameters& p
     const auto carrierCos = std::cos(phase);
     const auto carrierSin = std::sin(phase);
     const auto loopedInput = input + feedbackDc.process(feedbackState) * smoothedFeedback;
-    const auto real = loopedInput;
-    const auto imag = analyticImag(loopedInput);
+    float delayedReal = 0.0f;
+    const auto imag = analyticImag(loopedInput, delayedReal);
+    const auto real = delayedReal;
     const auto shifted = real * carrierCos - imag * carrierSin;
     const auto ringed = loopedInput * carrierCos * 1.65f;
 

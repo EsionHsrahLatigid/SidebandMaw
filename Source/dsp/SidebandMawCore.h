@@ -41,6 +41,8 @@ struct MawSnapshot
 class SidebandMawCore
 {
 public:
+    static constexpr int latencySamples = 64;
+
     void prepare(double newSampleRate, int channelIndex);
     void reset() noexcept;
     float processSample(float input, const SidebandMawParameters& params) noexcept;
@@ -61,14 +63,6 @@ private:
         std::atomic<bool> warning { false };
     };
 
-    struct Allpass1
-    {
-        float process(float input) noexcept;
-        void reset() noexcept;
-        float a = 0.0f;
-        float z = 0.0f;
-    };
-
     struct DcBlocker
     {
         float process(float input) noexcept;
@@ -78,13 +72,15 @@ private:
     };
 
     void setHilbertCoefficients() noexcept;
-    float analyticImag(float input) noexcept;
+    float analyticImag(float input, float& delayedReal) noexcept;
     float fold(float input, float drive) noexcept;
     float updateTone(float input, float cutoffHz) noexcept;
     void pushMeter(float input, float wet) noexcept;
 
-    std::array<Allpass1, 4> iPath;
-    std::array<Allpass1, 4> qPath;
+    static constexpr int hilbertTaps = 129;
+    std::array<float, hilbertTaps> hilbertCoefficients {};
+    std::array<float, hilbertTaps> hilbertRing {};
+    int hilbertWrite = 0;
     DcBlocker inputDc;
     DcBlocker outputDc;
     DcBlocker feedbackDc;

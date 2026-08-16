@@ -1,6 +1,6 @@
 # SidebandMaw
 
-SidebandMaw is an EsionHsrahLatigid JUCE audio-effect plug-in for live SSB frequency shifting, ring modulation, and folded sideband feedback.
+SidebandMaw is an EsionHsrahLatigid JUCE audio-effect plug-in for live upper-sideband frequency shifting, ring modulation, and folded sideband feedback.
 
 It is designed for aggressive metallic translation and unstable edge texture while keeping host-facing output finite and bounded. Silent input remains silent; non-silent input is guarded against collapse into DC rails, clipped constants, non-finite samples, or near-muted output at extreme settings.
 
@@ -39,6 +39,8 @@ ctest --preset plugin-release
 ```
 
 Readable local artifacts are staged under `artifacts/plugin-release/<platform>/`.
+
+The upper-sideband shift path uses a fixed windowed FIR Hilbert transformer and reports 64 samples of latency.
 
 ## Safety
 

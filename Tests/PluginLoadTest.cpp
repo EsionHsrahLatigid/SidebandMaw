@@ -62,8 +62,8 @@ int main(int argc, char** argv)
     }
 
     instance->prepareToPlay(48000.0, 256);
-    if (instance->getLatencySamples() != 0)
-        return failure(8, "hosted latency should be zero");
+    if (instance->getLatencySamples() != 64)
+        return failure(8, "hosted latency should match the Hilbert wet path delay");
 
     constexpr const char* parameterNames[] {
         "Shift", "Mode", "Feedback", "Spread", "Drive", "Tone", "Mix", "Output"

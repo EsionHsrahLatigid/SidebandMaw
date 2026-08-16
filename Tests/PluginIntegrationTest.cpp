@@ -55,7 +55,8 @@ int main()
     passed &= check(processor->getName() == "SidebandMaw", "product name should be SidebandMaw");
     passed &= check(!processor->acceptsMidi(), "processor should not accept MIDI");
     passed &= check(!processor->isMidiEffect(), "processor should be an audio effect");
-    passed &= check(processor->getLatencySamples() == 0, "processor should report zero latency");
+    passed &= check(processor->getLatencySamples() == 0,
+                    "processor should announce latency after the host prepares it");
 
     std::unique_ptr<juce::AudioProcessorEditor> editor(processor->createEditor());
     passed &= check(editor != nullptr, "processor should create an editor");
@@ -110,7 +111,8 @@ int main()
 
     constexpr double sampleRate = 48000.0;
     processor->prepareToPlay(sampleRate, 1024);
-    passed &= check(processor->getLatencySamples() == 0, "prepared processor should remain zero latency");
+    passed &= check(processor->getLatencySamples() == sidebandmaw::dsp::SidebandMawCore::latencySamples,
+                    "prepared processor latency should match the Hilbert wet path delay");
     const int blockSizes[] { 32, 64, 127, 256, 511, 1024 };
     int generatedSamples = 0;
     for (const auto blockSize : blockSizes)

@@ -57,7 +57,7 @@ void SidebandMawAudioProcessor::cacheParameterPointers()
 
 void SidebandMawAudioProcessor::prepareToPlay(double sampleRate, int)
 {
-    setLatencySamples(0);
+    setLatencySamples(sidebandmaw::dsp::SidebandMawCore::latencySamples);
     for (std::size_t i = 0; i < cores.size(); ++i)
         cores[i].prepare(sampleRate, static_cast<int>(i));
 }

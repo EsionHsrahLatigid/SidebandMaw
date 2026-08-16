@@ -1,12 +1,14 @@
 #include "../Source/dsp/SidebandMawCore.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <iostream>
 #include <memory>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -79,11 +81,11 @@ Metrics measure(const std::vector<float>& signal)
     return result;
 }
 
-std::vector<float> sine(float hz, std::size_t samples, float amplitude = 0.35f)
+std::vector<float> sine(float hz, std::size_t samples, float amplitude = 0.35f, float sampleRate = 48000.0f)
 {
     std::vector<float> result(samples);
     for (std::size_t i = 0; i < samples; ++i)
-        result[i] = amplitude * std::sin(2.0f * 3.14159265358979323846f * hz * static_cast<float>(i) / 48000.0f);
+        result[i] = amplitude * std::sin(2.0f * 3.14159265358979323846f * hz * static_cast<float>(i) / sampleRate);
     return result;
 }
 
@@ -101,10 +103,11 @@ std::vector<float> seededNoise(std::size_t samples)
 
 std::vector<float> render(SidebandMawParameters params,
                           const std::vector<float>& input,
-                          const std::vector<int>& partitions)
+                          const std::vector<int>& partitions,
+                          double sampleRate = 48000.0)
 {
     auto core = std::make_unique<SidebandMawCore>();
-    core->prepare(48000.0, 0);
+    core->prepare(sampleRate, 0);
     std::vector<float> output;
     output.reserve(input.size());
     std::size_t index = 0;
@@ -120,14 +123,14 @@ std::vector<float> render(SidebandMawParameters params,
     return output;
 }
 
-float dftMagnitude(const std::vector<float>& signal, float hz, std::size_t start)
+float dftMagnitude(const std::vector<float>& signal, float hz, std::size_t start, float sampleRate = 48000.0f)
 {
     double real = 0.0;
     double imag = 0.0;
     constexpr double twoPi = 6.28318530717958647692;
     for (std::size_t i = start; i < signal.size(); ++i)
     {
-        const auto phase = twoPi * static_cast<double>(hz) * static_cast<double>(i - start) / 48000.0;
+        const auto phase = twoPi * static_cast<double>(hz) * static_cast<double>(i - start) / sampleRate;
         real += signal[i] * std::cos(phase);
         imag -= signal[i] * std::sin(phase);
     }
@@ -152,22 +155,47 @@ void silence_and_nonfinite_are_guarded()
     }
 }
 
-void shift_translates_tone_energy()
+void upper_sideband_shift_rejects_lower_sideband()
 {
-    SidebandMawParameters params;
-    params.shiftHz = 600.0f;
-    params.mode = Mode::shift;
-    params.feedback = 0.0f;
-    params.drive = 0.0f;
-    params.mix = 1.0f;
+    struct Case
+    {
+        float sampleRate;
+        float inputHz;
+        float shiftHz;
+    };
 
-    auto output = render(params, sine(440.0f, 48000), { 128 });
-    const auto carrier = dftMagnitude(output, 440.0f, 16000);
-    const auto upper = dftMagnitude(output, 1040.0f, 16000);
-    const auto lower = dftMagnitude(output, 160.0f, 16000);
-    std::cout << "shift dft carrier=" << carrier << " upper=" << upper << " lower=" << lower << '\n';
-    expect(std::max(upper, lower) > carrier * 1.35f, "SSB shift should move more energy away from the original tone");
-    expect(measure(output).rms > 0.03f, "shifted output should remain audible");
+    const Case cases[] {
+        { 44100.0f, 440.0f, 600.0f },
+        { 48000.0f, 700.0f, 1200.0f },
+        { 96000.0f, 1100.0f, 3000.0f }
+    };
+
+    for (const auto test : cases)
+    {
+        SidebandMawParameters params;
+        params.shiftHz = test.shiftHz;
+        params.mode = Mode::shift;
+        params.feedback = 0.0f;
+        params.spread = 0.5f;
+        params.drive = 0.0f;
+        params.mix = 1.0f;
+
+        const auto samples = static_cast<std::size_t>(test.sampleRate * 2.0f);
+        auto output = render(params, sine(test.inputHz, samples, 0.35f, test.sampleRate), { 128 },
+                             static_cast<double>(test.sampleRate));
+        const auto start = static_cast<std::size_t>(test.sampleRate * 0.75f);
+        const auto carrier = dftMagnitude(output, test.inputHz, start, test.sampleRate);
+        const auto upper = dftMagnitude(output, test.inputHz + test.shiftHz, start, test.sampleRate);
+        const auto lower = dftMagnitude(output, std::abs(test.inputHz - test.shiftHz), start, test.sampleRate);
+        const auto rejectionDb = 20.0f * std::log10((upper + 0.000001f) / (lower + 0.000001f));
+        std::cout << "shift sr=" << test.sampleRate << " input=" << test.inputHz
+                  << " shift=" << test.shiftHz << " carrier=" << carrier
+                  << " upper=" << upper << " lower=" << lower
+                  << " rejectDb=" << rejectionDb << '\n';
+        expect(upper > carrier * 20.0f, "upper-sideband shift should suppress the original tone after warmup");
+        expect(rejectionDb >= 15.0f, "upper-sideband shift should reject the lower sideband by at least 15 dB");
+        expect(measure(output).rms > 0.03f, "shifted output should remain audible");
+    }
 }
 
 void ring_mode_exposes_sum_and_difference_sidebands()
@@ -283,6 +311,45 @@ void low_sample_rate_extreme_shift_keeps_phase_bounded()
     expect(metrics.uniqueBuckets > 128, "low-rate maximum shift should not collapse into a constant");
 }
 
+void snapshot_copy_is_safe_under_concurrent_stress()
+{
+    SidebandMawCore core;
+    core.prepare(48000.0, 0);
+    SidebandMawParameters params;
+    params.shiftHz = 1800.0f;
+    params.mode = Mode::maw;
+    params.feedback = 0.75f;
+    params.drive = 0.9f;
+
+    std::atomic<bool> running { true };
+    std::atomic<int> badReads { 0 };
+    std::thread reader([&] {
+        while (running.load(std::memory_order_relaxed))
+        {
+            MawSnapshot snapshot;
+            core.copySnapshot(snapshot);
+            if (!std::isfinite(snapshot.inputRms) || !std::isfinite(snapshot.wetRms)
+                || !std::isfinite(snapshot.feedbackEnergy) || !std::isfinite(snapshot.shiftHz))
+                badReads.fetch_add(1, std::memory_order_relaxed);
+            for (auto value : snapshot.cells)
+                if (!std::isfinite(value) || value < 0.0f || value > 1.0f)
+                    badReads.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    for (int i = 0; i < 120000; ++i)
+    {
+        const auto input = 0.2f * std::sin(0.011f * static_cast<float>(i))
+                         + 0.04f * std::sin(0.071f * static_cast<float>(i));
+        const auto output = core.processSample(input, params);
+        expect(std::isfinite(output), "race stress output should remain finite");
+    }
+
+    running.store(false, std::memory_order_relaxed);
+    reader.join();
+    expect(badReads.load(std::memory_order_relaxed) == 0, "snapshot reader should not observe invalid values");
+}
+
 } // namespace
 
 int main()
@@ -290,12 +357,13 @@ int main()
     try
     {
         silence_and_nonfinite_are_guarded();
-        shift_translates_tone_energy();
+        upper_sideband_shift_rejects_lower_sideband();
         ring_mode_exposes_sum_and_difference_sidebands();
         maw_extremes_stay_aggressive_and_bounded();
         block_partition_determinism_and_reset();
         snapshot_reports_functional_state();
         low_sample_rate_extreme_shift_keeps_phase_bounded();
+        snapshot_copy_is_safe_under_concurrent_stress();
         std::cout << "SidebandMaw DSP tests passed\n";
         return 0;
     }
