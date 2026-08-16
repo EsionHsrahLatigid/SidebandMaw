@@ -2,11 +2,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 
 namespace sidebandmaw::dsp
 {
 namespace
 {
+static_assert(std::atomic<float>::is_always_lock_free,
+              "SidebandMaw publishes UI metering with lock-free atomic float stores");
+
 constexpr float pi = 3.14159265358979323846f;
 constexpr float twoPi = 2.0f * pi;
 
@@ -31,6 +35,32 @@ float dbToGain(float db) noexcept
     return std::pow(10.0f, db / 20.0f);
 }
 } // namespace
+
+void SidebandMawCore::AtomicMawSnapshot::reset() noexcept
+{
+    for (auto& cell : cells)
+        cell.store(0.0f, std::memory_order_relaxed);
+
+    inputRms.store(0.0f, std::memory_order_relaxed);
+    wetRms.store(0.0f, std::memory_order_relaxed);
+    feedbackEnergy.store(0.0f, std::memory_order_relaxed);
+    shiftHz.store(0.0f, std::memory_order_relaxed);
+    mode.store(0, std::memory_order_relaxed);
+    warning.store(false, std::memory_order_relaxed);
+}
+
+void SidebandMawCore::AtomicMawSnapshot::copyTo(MawSnapshot& destination) const noexcept
+{
+    for (std::size_t i = 0; i < destination.cells.size(); ++i)
+        destination.cells[i] = cells[i].load(std::memory_order_relaxed);
+
+    destination.inputRms = inputRms.load(std::memory_order_relaxed);
+    destination.wetRms = wetRms.load(std::memory_order_relaxed);
+    destination.feedbackEnergy = feedbackEnergy.load(std::memory_order_relaxed);
+    destination.shiftHz = shiftHz.load(std::memory_order_relaxed);
+    destination.mode = mode.load(std::memory_order_relaxed);
+    destination.warning = warning.load(std::memory_order_relaxed);
+}
 
 float SidebandMawCore::Allpass1::process(float input) noexcept
 {
@@ -87,7 +117,7 @@ void SidebandMawCore::reset() noexcept
     inputDc.reset();
     outputDc.reset();
     feedbackDc.reset();
-    snapshot = {};
+    snapshot.reset();
     phase = 0.0f;
     smoothedShift = 240.0f;
     smoothedFeedback = 0.18f;
@@ -154,8 +184,10 @@ float SidebandMawCore::processSample(float input, const SidebandMawParameters& p
     const auto spreadHz = (smoothedSpread - 0.5f) * channelPolarity * 180.0f;
     auto frequency = std::clamp(smoothedShift + spreadHz, 0.0f, 20000.0f);
     phase += twoPi * frequency / static_cast<float>(sampleRate);
-    if (phase >= twoPi)
+    while (phase >= twoPi)
         phase -= twoPi;
+    while (phase < 0.0f)
+        phase += twoPi;
 
     const auto carrierCos = std::cos(phase);
     const auto carrierSin = std::sin(phase);
@@ -183,9 +215,11 @@ float SidebandMawCore::processSample(float input, const SidebandMawParameters& p
 
     const auto inputAbs = std::abs(input);
     const auto wetAbs = std::abs(wet);
-    snapshot.warning = inputAbs > 0.03f && smoothedMix > 0.5f && wetAbs < 0.002f
+    const auto warning = inputAbs > 0.03f && smoothedMix > 0.5f && wetAbs < 0.002f
         && (smoothedDrive > 0.65f || smoothedFeedback > 0.65f);
-    if (snapshot.warning)
+    snapshot.warning.store(warning, std::memory_order_relaxed);
+    snapshot.mode.store(static_cast<int>(params.mode), std::memory_order_relaxed);
+    if (warning)
         wet += input * (0.16f + 0.12f * smoothedDrive);
 
     wet = outputDc.process(wet);
@@ -200,26 +234,34 @@ void SidebandMawCore::pushMeter(float input, float wet) noexcept
 {
     inputSq = smooth(inputSq, input * input, 0.004f);
     wetSq = smooth(wetSq, wet * wet, 0.004f);
-    snapshot.inputRms = std::sqrt(std::max(0.0f, inputSq));
-    snapshot.wetRms = std::sqrt(std::max(0.0f, wetSq));
-    snapshot.feedbackEnergy = std::sqrt(std::max(0.0f, feedbackSq));
-    snapshot.shiftHz = smoothedShift;
+    const auto inputRms = std::sqrt(std::max(0.0f, inputSq));
+    const auto wetRms = std::sqrt(std::max(0.0f, wetSq));
+    const auto feedbackEnergy = std::sqrt(std::max(0.0f, feedbackSq));
+    snapshot.inputRms.store(inputRms, std::memory_order_relaxed);
+    snapshot.wetRms.store(wetRms, std::memory_order_relaxed);
+    snapshot.feedbackEnergy.store(feedbackEnergy, std::memory_order_relaxed);
+    snapshot.shiftHz.store(smoothedShift, std::memory_order_relaxed);
 
     if (++meterCounter < 96)
         return;
     meterCounter = 0;
 
     for (int y = 0; y < MawSnapshot::rows - 1; ++y)
-        snapshot.cells[static_cast<std::size_t>(y * MawSnapshot::columns + meterWrite)] =
-            snapshot.cells[static_cast<std::size_t>((y + 1) * MawSnapshot::columns + meterWrite)];
+    {
+        const auto next = snapshot.cells[static_cast<std::size_t>((y + 1) * MawSnapshot::columns + meterWrite)]
+                              .load(std::memory_order_relaxed);
+        snapshot.cells[static_cast<std::size_t>(y * MawSnapshot::columns + meterWrite)]
+            .store(next, std::memory_order_relaxed);
+    }
 
-    const auto energy = std::clamp(snapshot.wetRms * 6.0f, 0.0f, 1.0f);
-    const auto fb = std::clamp(snapshot.feedbackEnergy * 8.0f, 0.0f, 1.0f);
+    const auto energy = std::clamp(wetRms * 6.0f, 0.0f, 1.0f);
+    const auto fb = std::clamp(feedbackEnergy * 8.0f, 0.0f, 1.0f);
     const auto row = static_cast<int>(std::round(energy * static_cast<float>(MawSnapshot::rows - 1)));
     for (int y = 0; y < MawSnapshot::rows; ++y)
     {
         const auto value = y >= MawSnapshot::rows - 1 - row ? std::max(energy, fb * 0.72f) : 0.0f;
-        snapshot.cells[static_cast<std::size_t>(y * MawSnapshot::columns + meterWrite)] = value;
+        snapshot.cells[static_cast<std::size_t>(y * MawSnapshot::columns + meterWrite)]
+            .store(value, std::memory_order_relaxed);
     }
 
     meterWrite = (meterWrite + 1) % MawSnapshot::columns;
@@ -227,7 +269,7 @@ void SidebandMawCore::pushMeter(float input, float wet) noexcept
 
 void SidebandMawCore::copySnapshot(MawSnapshot& destination) const noexcept
 {
-    destination = snapshot;
+    snapshot.copyTo(destination);
 }
 
 } // namespace sidebandmaw::dsp

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 
 namespace sidebandmaw::dsp
@@ -46,6 +47,20 @@ public:
     void copySnapshot(MawSnapshot& destination) const noexcept;
 
 private:
+    struct AtomicMawSnapshot
+    {
+        void reset() noexcept;
+        void copyTo(MawSnapshot& destination) const noexcept;
+
+        std::array<std::atomic<float>, MawSnapshot::columns * MawSnapshot::rows> cells {};
+        std::atomic<float> inputRms { 0.0f };
+        std::atomic<float> wetRms { 0.0f };
+        std::atomic<float> feedbackEnergy { 0.0f };
+        std::atomic<float> shiftHz { 0.0f };
+        std::atomic<int> mode { 0 };
+        std::atomic<bool> warning { false };
+    };
+
     struct Allpass1
     {
         float process(float input) noexcept;
@@ -73,7 +88,7 @@ private:
     DcBlocker inputDc;
     DcBlocker outputDc;
     DcBlocker feedbackDc;
-    MawSnapshot snapshot;
+    AtomicMawSnapshot snapshot;
     double sampleRate = 48000.0;
     float phase = 0.0f;
     float smoothedShift = 240.0f;

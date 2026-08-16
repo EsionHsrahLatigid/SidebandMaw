@@ -249,8 +249,38 @@ void snapshot_reports_functional_state()
     expect(snapshot.inputRms > 0.01f, "snapshot should report input activity");
     expect(snapshot.wetRms > 0.01f, "snapshot should report wet activity");
     expect(snapshot.shiftHz > 250.0f, "snapshot should report smoothed shift");
+    expect(snapshot.mode == static_cast<int>(Mode::maw), "snapshot should publish the active mode");
     const auto active = std::count_if(snapshot.cells.begin(), snapshot.cells.end(), [](float v) { return v > 0.0f; });
     expect(active > 0, "snapshot matrix should contain activity cells");
+}
+
+void low_sample_rate_extreme_shift_keeps_phase_bounded()
+{
+    SidebandMawCore core;
+    core.prepare(8000.0, 0);
+    SidebandMawParameters params;
+    params.shiftHz = 20000.0f;
+    params.mode = Mode::shift;
+    params.feedback = 0.94f;
+    params.spread = 1.0f;
+    params.drive = 1.0f;
+    params.toneHz = 16000.0f;
+    params.mix = 1.0f;
+    params.outputDb = 12.0f;
+
+    std::vector<float> output;
+    output.reserve(64000);
+    for (int i = 0; i < 64000; ++i)
+    {
+        const auto input = 0.25f * std::sin(2.0f * 3.14159265358979323846f * 330.0f
+                                            * static_cast<float>(i) / 8000.0f);
+        output.push_back(core.processSample(input, params));
+    }
+
+    const auto metrics = measure(output);
+    expect(metrics.rms > 0.02f, "low-rate maximum shift should remain audible");
+    expect(metrics.peak <= 0.981f, "low-rate maximum shift should remain bounded");
+    expect(metrics.uniqueBuckets > 128, "low-rate maximum shift should not collapse into a constant");
 }
 
 } // namespace
@@ -265,6 +295,7 @@ int main()
         maw_extremes_stay_aggressive_and_bounded();
         block_partition_determinism_and_reset();
         snapshot_reports_functional_state();
+        low_sample_rate_extreme_shift_keeps_phase_bounded();
         std::cout << "SidebandMaw DSP tests passed\n";
         return 0;
     }
