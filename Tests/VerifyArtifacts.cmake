@@ -37,6 +37,13 @@ if(EXPECT_AU)
         message(FATAL_ERROR "Missing staged AU: ${au}")
     endif()
 
+    set(au_plist "${au}/Contents/Info.plist")
+    file(READ "${au_plist}" au_plist_contents)
+    string(FIND "${au_plist_contents}" "resourceUsage" resource_usage_key)
+    if(NOT resource_usage_key EQUAL -1)
+        message(FATAL_ERROR "AU Info.plist contains over-broad resourceUsage declarations")
+    endif()
+
     foreach(bundle IN ITEMS "${vst3}" "${standalone}" "${au}")
         execute_process(
             COMMAND codesign --verify --deep --strict "${bundle}"

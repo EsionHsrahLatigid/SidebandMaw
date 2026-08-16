@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(SidebandMaw VERSION 0.1.0 LANGUAGES C CXX)
+project(SidebandMaw VERSION 0.1.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -81,6 +81,7 @@ if(SIDEBANDMAW_BUILD_PLUGIN)
         DESCRIPTION "SSB frequency shift, ring modulation, and folded sideband feedback effect"
         PLUGIN_MANUFACTURER_CODE EHL_
         PLUGIN_CODE SbMw
+        AU_SANDBOX_SAFE TRUE
         FORMATS ${SIDEBANDMAW_FORMATS}
         IS_SYNTH FALSE
         NEEDS_MIDI_INPUT FALSE
