@@ -1,0 +1,6 @@
+build/
+artifacts/
+.DS_Store
+*.user
+*.log
+compile_commands.json

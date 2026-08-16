@@ -1,0 +1,276 @@
+#include "../Source/dsp/SidebandMawCore.h"
+
+#include <algorithm>
+#include <cmath>
+#include <exception>
+#include <iostream>
+#include <memory>
+#include <numeric>
+#include <string>
+#include <vector>
+
+namespace
+{
+using namespace sidebandmaw::dsp;
+
+struct Failure final : std::exception
+{
+    explicit Failure(std::string messageIn) : message(std::move(messageIn)) {}
+    const char* what() const noexcept override { return message.c_str(); }
+    std::string message;
+};
+
+struct Metrics
+{
+    float rms = 0.0f;
+    float peak = 0.0f;
+    float dc = 0.0f;
+    int zeroCrossings = 0;
+    int clipped = 0;
+    int uniqueBuckets = 0;
+};
+
+[[noreturn]] void fail(const std::string& message)
+{
+    throw Failure(message);
+}
+
+void expect(bool condition, const std::string& message)
+{
+    if (!condition)
+        fail(message);
+}
+
+void near(float actual, float expected, float tolerance, const std::string& message)
+{
+    if (std::abs(actual - expected) > tolerance)
+        fail(message + " actual=" + std::to_string(actual) + " expected=" + std::to_string(expected));
+}
+
+Metrics measure(const std::vector<float>& signal)
+{
+    Metrics result;
+    double sum = 0.0;
+    double sumSquares = 0.0;
+    bool hadPrevious = false;
+    float previous = 0.0f;
+    std::vector<int> buckets;
+    buckets.reserve(signal.size());
+
+    for (auto sample : signal)
+    {
+        expect(std::isfinite(sample), "output must be finite");
+        sum += sample;
+        sumSquares += static_cast<double>(sample) * sample;
+        result.peak = std::max(result.peak, std::abs(sample));
+        if (std::abs(sample) >= 0.979f)
+            ++result.clipped;
+        if (hadPrevious && ((previous < 0.0f && sample >= 0.0f) || (previous >= 0.0f && sample < 0.0f)))
+            ++result.zeroCrossings;
+        previous = sample;
+        hadPrevious = true;
+        buckets.push_back(static_cast<int>(std::round(sample * 4096.0f)));
+    }
+
+    std::sort(buckets.begin(), buckets.end());
+    result.uniqueBuckets = static_cast<int>(std::unique(buckets.begin(), buckets.end()) - buckets.begin());
+    result.rms = signal.empty() ? 0.0f : static_cast<float>(std::sqrt(sumSquares / static_cast<double>(signal.size())));
+    result.dc = signal.empty() ? 0.0f : static_cast<float>(sum / static_cast<double>(signal.size()));
+    return result;
+}
+
+std::vector<float> sine(float hz, std::size_t samples, float amplitude = 0.35f)
+{
+    std::vector<float> result(samples);
+    for (std::size_t i = 0; i < samples; ++i)
+        result[i] = amplitude * std::sin(2.0f * 3.14159265358979323846f * hz * static_cast<float>(i) / 48000.0f);
+    return result;
+}
+
+std::vector<float> seededNoise(std::size_t samples)
+{
+    std::vector<float> result(samples);
+    unsigned state = 0x8da6b343u;
+    for (auto& sample : result)
+    {
+        state = state * 1664525u + 1013904223u;
+        sample = (static_cast<float>((state >> 8u) & 0xffffu) / 32768.0f - 1.0f) * 0.25f;
+    }
+    return result;
+}
+
+std::vector<float> render(SidebandMawParameters params,
+                          const std::vector<float>& input,
+                          const std::vector<int>& partitions)
+{
+    auto core = std::make_unique<SidebandMawCore>();
+    core->prepare(48000.0, 0);
+    std::vector<float> output;
+    output.reserve(input.size());
+    std::size_t index = 0;
+    std::size_t partition = 0;
+    while (index < input.size())
+    {
+        const auto count = std::min<std::size_t>(static_cast<std::size_t>(partitions[partition % partitions.size()]),
+                                                 input.size() - index);
+        for (std::size_t i = 0; i < count; ++i)
+            output.push_back(core->processSample(input[index++], params));
+        ++partition;
+    }
+    return output;
+}
+
+float dftMagnitude(const std::vector<float>& signal, float hz, std::size_t start)
+{
+    double real = 0.0;
+    double imag = 0.0;
+    constexpr double twoPi = 6.28318530717958647692;
+    for (std::size_t i = start; i < signal.size(); ++i)
+    {
+        const auto phase = twoPi * static_cast<double>(hz) * static_cast<double>(i - start) / 48000.0;
+        real += signal[i] * std::cos(phase);
+        imag -= signal[i] * std::sin(phase);
+    }
+    return static_cast<float>(std::sqrt(real * real + imag * imag) / static_cast<double>(signal.size() - start));
+}
+
+void silence_and_nonfinite_are_guarded()
+{
+    SidebandMawParameters params;
+    params.mode = Mode::maw;
+    params.feedback = 0.94f;
+    params.drive = 1.0f;
+    auto silence = render(params, std::vector<float>(12000, 0.0f), { 17, 64, 511 });
+    expect(measure(silence).rms == 0.0f, "silence should remain exact silence");
+
+    auto core = std::make_unique<SidebandMawCore>();
+    core->prepare(96000.0, 1);
+    for (int i = 0; i < 4000; ++i)
+    {
+        const auto input = i == 32 ? INFINITY : (i == 153 ? NAN : 0.1f);
+        expect(std::isfinite(core->processSample(input, params)), "non-finite input should not propagate");
+    }
+}
+
+void shift_translates_tone_energy()
+{
+    SidebandMawParameters params;
+    params.shiftHz = 600.0f;
+    params.mode = Mode::shift;
+    params.feedback = 0.0f;
+    params.drive = 0.0f;
+    params.mix = 1.0f;
+
+    auto output = render(params, sine(440.0f, 48000), { 128 });
+    const auto carrier = dftMagnitude(output, 440.0f, 16000);
+    const auto upper = dftMagnitude(output, 1040.0f, 16000);
+    const auto lower = dftMagnitude(output, 160.0f, 16000);
+    std::cout << "shift dft carrier=" << carrier << " upper=" << upper << " lower=" << lower << '\n';
+    expect(std::max(upper, lower) > carrier * 1.35f, "SSB shift should move more energy away from the original tone");
+    expect(measure(output).rms > 0.03f, "shifted output should remain audible");
+}
+
+void ring_mode_exposes_sum_and_difference_sidebands()
+{
+    SidebandMawParameters params;
+    params.shiftHz = 600.0f;
+    params.mode = Mode::ring;
+    params.feedback = 0.0f;
+    params.drive = 0.0f;
+    params.mix = 1.0f;
+
+    auto output = render(params, sine(440.0f, 48000), { 256 });
+    const auto carrier = dftMagnitude(output, 440.0f, 16000);
+    const auto upper = dftMagnitude(output, 1040.0f, 16000);
+    const auto lower = dftMagnitude(output, 160.0f, 16000);
+    std::cout << "ring dft carrier=" << carrier << " upper=" << upper << " lower=" << lower << '\n';
+    expect(upper > carrier * 2.0f, "ring mode should create a strong upper sideband");
+    expect(lower > carrier * 2.0f, "ring mode should create a strong lower sideband");
+}
+
+void maw_extremes_stay_aggressive_and_bounded()
+{
+    SidebandMawParameters params;
+    params.shiftHz = 19000.0f;
+    params.mode = Mode::maw;
+    params.feedback = 0.94f;
+    params.spread = 1.0f;
+    params.drive = 1.0f;
+    params.toneHz = 16000.0f;
+    params.mix = 1.0f;
+    params.outputDb = 12.0f;
+    auto output = render(params, seededNoise(96000), { 17, 31, 64, 509, 1024 });
+    const auto metrics = measure(output);
+    std::cout << "maw rms=" << metrics.rms << " peak=" << metrics.peak
+              << " dc=" << metrics.dc << " zc=" << metrics.zeroCrossings
+              << " unique=" << metrics.uniqueBuckets << " clipped=" << metrics.clipped << '\n';
+    expect(metrics.rms > 0.08f, "extreme maw output should not collapse into near silence");
+    expect(metrics.peak <= 0.981f, "final ceiling should bound output");
+    expect(metrics.clipped < 64, "output should not become a clipped constant");
+    expect(std::abs(metrics.dc) < 0.08f, "DC guard should control offset");
+    expect(metrics.zeroCrossings > 1000, "extreme maw output should retain high activity");
+    expect(metrics.uniqueBuckets > 256, "extreme maw output should not become stationary");
+}
+
+void block_partition_determinism_and_reset()
+{
+    SidebandMawParameters params;
+    params.shiftHz = 2300.0f;
+    params.mode = Mode::maw;
+    params.feedback = 0.72f;
+    params.spread = 0.83f;
+    params.drive = 0.88f;
+    params.toneHz = 7200.0f;
+    auto input = seededNoise(32000);
+
+    auto first = render(params, input, { 64 });
+    auto second = render(params, input, { 64 });
+    expect(first == second, "same render path should be deterministic after reset");
+
+    auto partitioned = render(params, input, { 1, 7, 31, 129, 511 });
+    expect(first.size() == partitioned.size(), "partitioned render size should match");
+    for (std::size_t i = 0; i < first.size(); ++i)
+        near(first[i], partitioned[i], 0.0f, "sample-by-sample processing should be independent of host block partitioning");
+}
+
+void snapshot_reports_functional_state()
+{
+    SidebandMawCore core;
+    core.prepare(48000.0, 0);
+    SidebandMawParameters params;
+    params.shiftHz = 1200.0f;
+    params.mode = Mode::maw;
+    params.drive = 0.7f;
+    for (int i = 0; i < 12000; ++i)
+        (void) core.processSample(0.2f * std::sin(0.03f * static_cast<float>(i)), params);
+
+    MawSnapshot snapshot;
+    core.copySnapshot(snapshot);
+    expect(snapshot.inputRms > 0.01f, "snapshot should report input activity");
+    expect(snapshot.wetRms > 0.01f, "snapshot should report wet activity");
+    expect(snapshot.shiftHz > 250.0f, "snapshot should report smoothed shift");
+    const auto active = std::count_if(snapshot.cells.begin(), snapshot.cells.end(), [](float v) { return v > 0.0f; });
+    expect(active > 0, "snapshot matrix should contain activity cells");
+}
+
+} // namespace
+
+int main()
+{
+    try
+    {
+        silence_and_nonfinite_are_guarded();
+        shift_translates_tone_energy();
+        ring_mode_exposes_sum_and_difference_sidebands();
+        maw_extremes_stay_aggressive_and_bounded();
+        block_partition_determinism_and_reset();
+        snapshot_reports_functional_state();
+        std::cout << "SidebandMaw DSP tests passed\n";
+        return 0;
+    }
+    catch (const std::exception& exception)
+    {
+        std::cerr << "[FAIL] " << exception.what() << '\n';
+        return 1;
+    }
+}
