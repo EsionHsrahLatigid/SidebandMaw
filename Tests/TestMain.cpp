@@ -198,6 +198,59 @@ void upper_sideband_shift_rejects_lower_sideband()
     }
 }
 
+void settled_impulse_respects_reported_latency_for_all_mix_values()
+{
+    for (const auto mix : { 0.0f, 0.5f, 1.0f })
+    {
+        SidebandMawCore core;
+        core.prepare(48000.0, 0);
+        SidebandMawParameters params;
+        params.shiftHz = 0.0f;
+        params.mode = Mode::ring;
+        params.feedback = 0.0f;
+        params.spread = 0.5f;
+        params.drive = 0.0f;
+        params.toneHz = 16000.0f;
+        params.mix = mix;
+        params.outputDb = -6.0f;
+
+        for (int i = 0; i < 24000; ++i)
+            (void) core.processSample(0.0f, params);
+
+        std::vector<float> output(256, 0.0f);
+        output[0] = core.processSample(0.5f, params);
+        for (std::size_t i = 1; i < output.size(); ++i)
+            output[i] = core.processSample(0.0f, params);
+
+        near(output.front(), 0.0f, 0.000001f, "settled impulse should have no direct sample-zero output");
+        for (int i = 1; i < SidebandMawCore::latencySamples; ++i)
+            near(output[static_cast<std::size_t>(i)], 0.0f, 0.0001f,
+                 "settled impulse should have no meaningful pre-latency output");
+
+        const auto peakIt = std::max_element(output.begin(), output.end(),
+                                             [](float a, float b) { return std::abs(a) < std::abs(b); });
+        const auto peakIndex = static_cast<int>(peakIt - output.begin());
+        float totalEnergy = 0.0f;
+        float latencyWindowEnergy = 0.0f;
+        for (std::size_t i = 0; i < output.size(); ++i)
+        {
+            const auto energy = output[i] * output[i];
+            totalEnergy += energy;
+            if (std::abs(static_cast<int>(i) - SidebandMawCore::latencySamples) <= 2)
+                latencyWindowEnergy += energy;
+        }
+
+        std::cout << "impulse mix=" << mix << " peakIndex=" << peakIndex
+                  << " peak=" << *peakIt << " latencyWindowEnergy=" << latencyWindowEnergy
+                  << " totalEnergy=" << totalEnergy << '\n';
+        expect(peakIndex == SidebandMawCore::latencySamples,
+               "settled impulse peak should align with reported latency");
+        expect(std::abs(*peakIt) > 0.20f, "settled impulse should keep audible latency-aligned energy");
+        expect(latencyWindowEnergy > totalEnergy * 0.65f,
+               "settled impulse energy should be concentrated at reported latency");
+    }
+}
+
 void ring_mode_exposes_sum_and_difference_sidebands()
 {
     SidebandMawParameters params;
@@ -358,6 +411,7 @@ int main()
     {
         silence_and_nonfinite_are_guarded();
         upper_sideband_shift_rejects_lower_sideband();
+        settled_impulse_respects_reported_latency_for_all_mix_values();
         ring_mode_exposes_sum_and_difference_sidebands();
         maw_extremes_stay_aggressive_and_bounded();
         block_partition_determinism_and_reset();

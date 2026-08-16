@@ -104,7 +104,9 @@ void SidebandMawCore::setHilbertCoefficients() noexcept
 void SidebandMawCore::reset() noexcept
 {
     hilbertRing.fill(0.0f);
+    dryDelayRing.fill(0.0f);
     hilbertWrite = 0;
+    dryDelayWrite = 0;
     inputDc.reset();
     outputDc.reset();
     feedbackDc.reset();
@@ -151,6 +153,21 @@ float SidebandMawCore::analyticImag(float input, float& delayedReal) noexcept
     return finiteOrZero(imag);
 }
 
+float SidebandMawCore::delayDry(float input) noexcept
+{
+    dryDelayRing[static_cast<std::size_t>(dryDelayWrite)] = input;
+
+    auto readIndex = dryDelayWrite - latencySamples;
+    if (readIndex < 0)
+        readIndex += dryDelaySize;
+
+    const auto delayed = dryDelayRing[static_cast<std::size_t>(readIndex)];
+    if (++dryDelayWrite >= dryDelaySize)
+        dryDelayWrite = 0;
+
+    return finiteOrZero(delayed);
+}
+
 float SidebandMawCore::fold(float input, float drive) noexcept
 {
     const auto preGain = 1.0f + 16.0f * drive * drive;
@@ -177,6 +194,7 @@ float SidebandMawCore::updateTone(float input, float cutoffHz) noexcept
 float SidebandMawCore::processSample(float input, const SidebandMawParameters& params) noexcept
 {
     input = inputDc.process(std::clamp(finiteOrZero(input), -4.0f, 4.0f));
+    const auto dry = delayDry(input);
 
     smoothedShift = smooth(smoothedShift, std::clamp(finiteOrZero(params.shiftHz), 0.0f, 20000.0f), 0.0025f);
     smoothedFeedback = smooth(smoothedFeedback, std::clamp(finiteOrZero(params.feedback), 0.0f, 0.94f), 0.0025f);
@@ -201,7 +219,7 @@ float SidebandMawCore::processSample(float input, const SidebandMawParameters& p
     const auto imag = analyticImag(loopedInput, delayedReal);
     const auto real = delayedReal;
     const auto shifted = real * carrierCos - imag * carrierSin;
-    const auto ringed = loopedInput * carrierCos * 1.65f;
+    const auto ringed = real * carrierCos * 1.65f;
 
     float wet = shifted;
     if (params.mode == Mode::ring)
@@ -229,7 +247,7 @@ float SidebandMawCore::processSample(float input, const SidebandMawParameters& p
         wet += input * (0.16f + 0.12f * smoothedDrive);
 
     wet = outputDc.process(wet);
-    const auto mixed = input * (1.0f - smoothedMix) + wet * smoothedMix;
+    const auto mixed = dry * (1.0f - smoothedMix) + wet * smoothedMix;
     const auto limited = std::tanh(mixed * smoothedOutput * 1.08f) * 0.94f;
     const auto output = finiteOrZero(limited);
     pushMeter(input, output);

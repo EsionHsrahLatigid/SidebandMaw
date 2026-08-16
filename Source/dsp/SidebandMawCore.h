@@ -73,6 +73,7 @@ private:
 
     void setHilbertCoefficients() noexcept;
     float analyticImag(float input, float& delayedReal) noexcept;
+    float delayDry(float input) noexcept;
     float fold(float input, float drive) noexcept;
     float updateTone(float input, float cutoffHz) noexcept;
     void pushMeter(float input, float wet) noexcept;
@@ -80,7 +81,10 @@ private:
     static constexpr int hilbertTaps = 129;
     std::array<float, hilbertTaps> hilbertCoefficients {};
     std::array<float, hilbertTaps> hilbertRing {};
+    static constexpr int dryDelaySize = latencySamples + 1;
+    std::array<float, dryDelaySize> dryDelayRing {};
     int hilbertWrite = 0;
+    int dryDelayWrite = 0;
     DcBlocker inputDc;
     DcBlocker outputDc;
     DcBlocker feedbackDc;

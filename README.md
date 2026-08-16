@@ -48,7 +48,7 @@ SidebandMaw enforces finite sample guards, bounded feedback, DC filtering, dampi
 
 ## Source Basis
 
-- SSB shifting uses an analytic-signal/Hilbert-transform structure: an allpass Hilbert approximation creates a quadrature branch, then the real and quadrature branches are multiplied by cosine/sine carrier phases to translate one sideband.
+- Upper-sideband shifting uses an analytic-signal/Hilbert-transform structure: a fixed 129-tap windowed FIR Hilbert transformer creates a quadrature branch, the real branch is delayed by 64 samples, and both branches are multiplied by cosine/sine carrier phases to translate the upper sideband.
 - Ring mode is balanced multiplication against the carrier; the deterministic tests verify sum and difference sidebands from a 440 Hz input and 600 Hz carrier.
 - The plug-in target, formats, bundle metadata, and APVTS state flow follow JUCE's primary CMake API and AudioProcessorValueTreeState documentation.
 - UI identity, palette, chrome, and canonical short logo are imported from pinned `juce-ehl-design-module` commit `46ba72a5cb98d84a1333bbdf71182aac136d9893`.
